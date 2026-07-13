@@ -9,6 +9,7 @@ from taipei_elearn.core.course_navigator import CourseNavigator
 from taipei_elearn.core.learning_record_scanner import CourseRecord
 from taipei_elearn.core.quiz_extractor import QuizExtractor, QuizSnapshot
 from taipei_elearn.core.quiz_course_scanner import QuizCandidate, QuizCourseScanner
+from taipei_elearn.core.enrollment_service import EnrollmentError, EnrollmentService
 
 
 class BrowserManagerError(RuntimeError):
@@ -35,23 +36,17 @@ class BrowserManager:
 
     @property
     def connected(self) -> bool:
-        return self._context is not None
+        return self._has_live_pages()
 
     def open(self) -> SessionResult:
         if self._context:
-            return self.detect_session()
+            if self._has_live_pages():
+                return self.detect_session()
+            self.logger.info("偵測到失效 Chrome context，清理後重新啟動")
+            self._reset_browser_state(log_errors=False)
         try:
-            from playwright.sync_api import sync_playwright
-
             self.profile_dir.mkdir(parents=True, exist_ok=True)
-            self._playwright = sync_playwright().start()
-            self._context = self._playwright.chromium.launch_persistent_context(
-                user_data_dir=str(self.profile_dir),
-                channel="chrome",
-                headless=False,
-                no_viewport=True,
-                args=["--start-maximized"],
-            )
+            self._launch_browser_context()
             page = self._context.pages[0] if self._context.pages else self._context.new_page()
             if page.url in ("", "about:blank"):
                 page.goto(self.HOME_URL, wait_until="domcontentloaded", timeout=30_000)
@@ -60,6 +55,26 @@ class BrowserManager:
         except Exception as exc:
             self.close()
             raise BrowserManagerError(self._friendly_error(exc)) from exc
+
+    def _launch_browser_context(self) -> None:
+        from playwright.sync_api import sync_playwright
+
+        self._playwright = sync_playwright().start()
+        self._context = self._playwright.chromium.launch_persistent_context(
+            user_data_dir=str(self.profile_dir),
+            channel="chrome",
+            headless=False,
+            no_viewport=True,
+            args=["--start-maximized"],
+        )
+
+    def _has_live_pages(self) -> bool:
+        if not self._context:
+            return False
+        try:
+            return any(not page.is_closed() for page in self._context.pages)
+        except Exception:
+            return False
 
     def detect_session(self) -> SessionResult:
         if not self._context:
@@ -237,11 +252,8 @@ class BrowserManager:
         return True
 
     def open_learning_records(self) -> str:
-        if not self._context:
-            raise BrowserManagerError("Chrome 尚未連線。")
-        pages = self._context.pages
-        if not pages:
-            raise BrowserManagerError("Chrome 沒有可操作頁面。")
+        if not self._has_live_pages():
+            self.open()
         page = self._select_course_page()
         try:
             if CourseNavigator.is_player(page):
@@ -275,31 +287,77 @@ class BrowserManager:
         except Exception as exc:
             raise BrowserManagerError(f"擷取測驗失敗：{str(exc).splitlines()[0]}") from exc
 
-    def scan_and_open_quizzes(self, courses: list[CourseRecord]) -> dict:
+    def search_enrollment_courses(self, keywords: list[str], progress=None):
+        page = self._active_page_for_enrollment()
+        try:
+            return EnrollmentService().search(page, keywords, progress)
+        except EnrollmentError as exc:
+            raise BrowserManagerError(str(exc)) from exc
+        except Exception as exc:
+            raise BrowserManagerError(f"批次搜尋課程失敗：{str(exc).splitlines()[0]}") from exc
+
+    def add_courses_to_pocket(self, courses, progress=None):
+        page = self._active_page_for_enrollment()
+        try:
+            return EnrollmentService().add_to_pocket(page, courses, progress)
+        except EnrollmentError as exc:
+            raise BrowserManagerError(str(exc)) from exc
+        except Exception as exc:
+            raise BrowserManagerError(f"加入選課口袋失敗：{str(exc).splitlines()[0]}") from exc
+
+    def enroll_all_from_pocket(self):
+        page = self._active_page_for_enrollment()
+        try:
+            return EnrollmentService().enroll_all(page)
+        except EnrollmentError as exc:
+            raise BrowserManagerError(str(exc)) from exc
+        except Exception as exc:
+            raise BrowserManagerError(f"選課口袋全部報名失敗：{str(exc).splitlines()[0]}") from exc
+
+    def _active_page_for_enrollment(self):
+        if not self._context or not self._context.pages:
+            raise BrowserManagerError("Chrome 尚未連線。")
+        return self._context.pages[-1]
+
+    def scan_quizzes(self, courses: list[CourseRecord]):
         if not self._context or not self._context.pages:
             raise BrowserManagerError("Chrome 尚未連線。")
         if not courses:
-            raise BrowserManagerError("學習紀錄沒有已勾選課程。")
+            raise BrowserManagerError("請先掃描學習紀錄。")
         page = self._context.pages[-1]
         try:
             self._leave_scorm_player(page)
             result = QuizCourseScanner().scan(page, courses)
-            self._quiz_candidates = result.candidates
-            self._quiz_index = -1
-            if not self._quiz_candidates:
+            if not result.candidates:
                 reasons = "；".join(result.skipped[:3])
                 raise BrowserManagerError(
-                    f"已掃描 {result.scanned_courses} 門，沒有可進入的未完成測驗。"
+                    f"已掃描 {result.scanned_courses} 門，沒有符合條件的測驗。"
                     f"{f' 原因：{reasons}' if reasons else ''}"
                 )
-            opened = self.open_next_quiz()
-            opened["scanned_courses"] = result.scanned_courses
-            opened["skipped"] = result.skipped
-            return opened
+            return result
         except BrowserManagerError:
             raise
         except Exception as exc:
             raise BrowserManagerError(f"掃描未測驗課程失敗：{str(exc).splitlines()[0]}") from exc
+
+    def start_quiz_queue(self, candidates: list[QuizCandidate] | tuple[QuizCandidate, ...]) -> dict:
+        selected = tuple(candidate for candidate in candidates if candidate.eligible)
+        if not selected:
+            raise BrowserManagerError("請至少勾選一門閱讀時數大於 0 的課程。")
+        self._quiz_candidates = selected
+        self._quiz_index = -1
+        return self.open_next_quiz()
+
+    def scan_and_open_quizzes(self, courses: list[CourseRecord]) -> dict:
+        """Backward-compatible shortcut used by older callers."""
+        result = self.scan_quizzes(courses)
+        opened = self.start_quiz_queue(result.candidates)
+        opened["scanned_courses"] = result.scanned_courses
+        opened["skipped"] = result.skipped
+        return opened
+
+    def has_next_quiz(self) -> bool:
+        return self._quiz_index + 1 < len(self._quiz_candidates)
 
     def open_next_quiz(self) -> dict:
         next_index = self._quiz_index + 1
@@ -336,7 +394,7 @@ class BrowserManager:
         course_id = re.search(r"[?&]id=(\d+)", candidate.course_url)
         activity_id = re.search(r"[?&]id=(\d+)", candidate.quiz_url)
         if not course_id or not activity_id:
-            raise BrowserManagerError("未完成測驗連結缺少課程或活動 ID。")
+            raise BrowserManagerError("測驗連結缺少課程或活動 ID。")
         record_link = page.locator(
             '#applySelection tbody tr:'
             f'has(a[href*="/course/view.php?id={course_id.group(1)}"]) '
@@ -344,7 +402,7 @@ class BrowserManager:
         )
         if record_link.count() != 1:
             raise BrowserManagerError(
-                f"學習紀錄找不到唯一的「未完成」測驗連結（id={activity_id.group(1)}）。"
+                f"學習紀錄找不到唯一的測驗連結（id={activity_id.group(1)}）。"
             )
         with page.expect_navigation(wait_until="domcontentloaded", timeout=30_000):
             record_link.click()
@@ -467,6 +525,73 @@ class BrowserManager:
         except Exception as exc:
             raise BrowserManagerError(f"填入答案失敗：{str(exc).splitlines()[0]}") from exc
 
+    def submit_quiz_answers(self, answers: dict[int, tuple[str, ...]]) -> int:
+        count = self.fill_quiz_answers(answers)
+        page = self._context.pages[-1]
+        try:
+            self._submit_quiz_attempt(page)
+            self.logger.info("測驗答案已自動送出，共 %s 題", count)
+            return count
+        except BrowserManagerError:
+            raise
+        except Exception as exc:
+            raise BrowserManagerError(f"送出測驗失敗：{str(exc).splitlines()[0]}") from exc
+
+    @staticmethod
+    def _submit_quiz_attempt(page) -> None:
+        finish = page.locator(
+            'form#responseform input[name="next"]:visible, '
+            'form#responseform button[name="next"]:visible, '
+            'form#responseform .mod_quiz-next-nav:visible'
+        )
+        if finish.count() == 0:
+            finish = page.locator('button:visible, input[type="submit"]:visible').filter(
+                has_text=re.compile(r"完成作答|finish attempt", re.I)
+            )
+        if finish.count() != 1:
+            raise BrowserManagerError("測驗頁找不到唯一的「完成作答」按鈕，停止送出。")
+        finish.click()
+
+        summary = page.locator('form#frm-finishattempt:visible')
+        try:
+            summary.wait_for(state="visible", timeout=20_000)
+        except Exception as exc:
+            if re.search(r"/mod/quiz/(?:review|view)\.php", page.url):
+                return
+            raise BrowserManagerError(f"完成作答後未進入作答摘要：{page.url}") from exc
+
+        submit_all = page.locator(
+            'form#frm-finishattempt button[name="submitall"]:visible, '
+            'form#frm-finishattempt input[name="submitall"]:visible, '
+            'form#frm-finishattempt button[type="submit"]:visible'
+        )
+        if submit_all.count() != 1:
+            raise BrowserManagerError("作答摘要找不到唯一的「提交所有答案並完成」按鈕。")
+        submit_all.click()
+
+        confirm = page.locator(
+            '.modal-dialog button[data-action="save"]:visible, '
+            '[role="dialog"] button[data-action="save"]:visible'
+        )
+        try:
+            confirm.first.wait_for(state="visible", timeout=5_000)
+        except Exception:
+            confirm = page.locator('.modal-dialog button:visible, [role="dialog"] button:visible').filter(
+                has_text=re.compile(r"提交所有答案並完成|submit all and finish", re.I)
+            )
+        if confirm.count() == 1:
+            confirm.click()
+        elif confirm.count() > 1:
+            raise BrowserManagerError("送出測驗確認按鈕不唯一，停止操作。")
+
+        try:
+            page.wait_for_function(
+                "() => !document.querySelector('form#frm-finishattempt')",
+                timeout=20_000,
+            )
+        except Exception as exc:
+            raise BrowserManagerError(f"送出測驗後頁面沒有完成跳轉：{page.url}") from exc
+
     def _prepare_unfinished_records(self, page) -> None:
         radio = page.locator("#r2s3_old")
         update_button = page.get_by_role("button", name="更新我的課程", exact=True)
@@ -491,18 +616,23 @@ class BrowserManager:
         )
 
     def close(self) -> None:
-        if self._context:
+        self._reset_browser_state(log_errors=True)
+
+    def _reset_browser_state(self, log_errors: bool) -> None:
+        context, self._context = self._context, None
+        if context:
             try:
-                self._context.close()
-            except Exception:
-                self.logger.exception("關閉 Chrome context 失敗")
-            self._context = None
-        if self._playwright:
+                context.close()
+            except Exception as exc:
+                if log_errors and not self._is_target_closed_error(exc):
+                    self.logger.exception("關閉 Chrome context 失敗")
+        playwright, self._playwright = self._playwright, None
+        if playwright:
             try:
-                self._playwright.stop()
-            except Exception:
-                self.logger.exception("停止 Playwright 失敗")
-            self._playwright = None
+                playwright.stop()
+            except Exception as exc:
+                if log_errors and not self._is_target_closed_error(exc):
+                    self.logger.exception("停止 Playwright 失敗")
 
     @staticmethod
     def _friendly_error(exc: Exception) -> str:

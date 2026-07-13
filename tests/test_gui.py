@@ -10,6 +10,9 @@ from taipei_elearn.ui.pages.learning import LearningPage
 from taipei_elearn.ui.pages.quiz import QuizPage
 from taipei_elearn.ui.styles import APP_STYLE
 from taipei_elearn.core.quiz_extractor import QuizOption, QuizQuestion, QuizSnapshot
+from taipei_elearn.core.quiz_course_scanner import (
+    QuizCandidate, QuizCourseScanResult,
+)
 
 
 def test_tables_support_scanned_and_mock_rows():
@@ -17,7 +20,9 @@ def test_tables_support_scanned_and_mock_rows():
     learning = LearningPage()
     enrollment = EnrollmentPage()
     assert learning.table.rowCount() == 0
-    assert enrollment.table.rowCount() == 30
+    assert enrollment.table.rowCount() == 0
+    assert "環境教育" in enrollment.keywords
+    assert enrollment.buttons["搜尋全部關鍵字"].isEnabled()
     assert learning.table.verticalScrollBarPolicy() == Qt.ScrollBarPolicy.ScrollBarAsNeeded
     learning.close()
     enrollment.close()
@@ -71,21 +76,37 @@ def test_countdown_zero_emits_time_reached_once():
     page.close()
 
 
-def test_quiz_page_enables_validation_after_extract():
+def test_quiz_page_lists_candidates_and_auto_submits_valid_clipboard_answer():
     app = QApplication.instance() or QApplication([])
     page = QuizPage()
+    available = QuizCandidate(
+        "可答課程", "course-1", "正式測驗", "quiz-1", "可開始答題",
+        "80", "10分0秒", 600, True, "",
+    )
+    blocked = QuizCandidate(
+        "零時數課程", "course-2", "正式測驗", "quiz-2",
+        "課程閱讀時數為 0，不能進入測驗", "未完成", "0秒", 0, False,
+        "課程閱讀時數為 0，不能進入測驗",
+    )
+    page.show_candidates(QuizCourseScanResult((available, blocked), 2, ()))
+    assert page.course_table.rowCount() == 2
+    assert page.selected_candidates() == [available]
+    assert page.start_button.isEnabled()
+    assert "不能勾選" in page.banner.label.text()
+
     snapshot = QuizSnapshot(
         "測驗", "https://example.test/mod/quiz/attempt.php?attempt=1",
         (QuizQuestion(1, "single", "題目？", (
             QuizOption("A", "甲"), QuizOption("B", "乙"),
         )),),
     )
-    page.show_snapshot(snapshot)
-    assert page.validate_button.isEnabled()
-    assert not page.fill_button.isEnabled()
-    assert "共 1 題" == page.question_count.text()
-    page.answer_editor.setPlainText("[[ANSWERS]]1=A[[/ANSWERS]]")
-    page._validate()
-    assert page.fill_button.isEnabled()
+    page.show_snapshot(snapshot, 1, 1, "可答課程")
+    assert "共 1 題" in page.question_count.text()
+    submitted = []
+    page.fill_requested.connect(submitted.append)
+    QApplication.clipboard().setText("[[ANSWERS]]1=A[[/ANSWERS]]")
+    page._read_clipboard_and_continue()
+    assert submitted == [{1: ("A",)}]
+    assert not page.clipboard_button.isEnabled()
     page.close()
     app.processEvents()

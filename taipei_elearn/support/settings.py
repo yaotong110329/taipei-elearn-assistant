@@ -33,8 +33,16 @@ class AppSettings:
         self.log_dir.mkdir(parents=True, exist_ok=True)
 
     def save(self) -> None:
+        raw = {}
+        if self.config_file.exists():
+            try:
+                current = json.loads(self.config_file.read_text(encoding="utf-8"))
+                if isinstance(current, dict):
+                    raw = current
+            except (OSError, ValueError, TypeError):
+                pass
+        raw["profile_dir"] = str(self.profile_dir)
         self.config_file.write_text(
-            json.dumps({"profile_dir": str(self.profile_dir)}, ensure_ascii=False, indent=2),
+            json.dumps(raw, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
-

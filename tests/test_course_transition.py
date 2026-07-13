@@ -169,3 +169,28 @@ def test_scorm_entry_uses_direct_url_without_waiting_for_old_page_navigation():
     navigator.enter_material(page, entry)
     assert page.goto_calls == [entry.url]
     assert "/mod/scorm/player.php" in page.url
+
+
+class RetryScormPage(DirectScormPage):
+    def goto(self, url, **_kwargs):
+        self.goto_calls.append(url)
+        self.url = (
+            "https://example.test/course/view.php?id=1"
+            if len(self.goto_calls) == 1
+            else "https://example.test/mod/scorm/player.php?id=9"
+        )
+
+    def locator(self, selector):
+        count = int('/mod/scorm/view.php?id=9' in selector)
+        return FakeLocator(self, selector, count)
+
+
+def test_scorm_entry_retries_once_when_platform_returns_to_course_page():
+    page = RetryScormPage()
+    navigator = CourseNavigator()
+    entry = MaterialEntry(
+        "C# 教材", "https://example.test/mod/scorm/view.php?id=9", "scorm"
+    )
+    navigator.enter_material(page, entry)
+    assert page.goto_calls == [entry.url, entry.url]
+    assert "/mod/scorm/player.php" in page.url

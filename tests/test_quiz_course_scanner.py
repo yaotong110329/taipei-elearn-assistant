@@ -23,20 +23,25 @@ class PageMustNotBeUsed:
         raise AssertionError(f"scan should use learning-record quiz URL, not page.{name}")
 
 
-def make_record(score: str, quiz_url: str, remaining_seconds: int | None = 0) -> CourseRecord:
+def make_record(
+    score: str, quiz_url: str, remaining_seconds: int | None = 0,
+    studied_seconds: int | None = 1800, completed: bool = False,
+) -> CourseRecord:
     return CourseRecord(
-        "1", "課程", False, "未完成", "0秒", 0, "1", 3600,
+        "1", "課程", completed, "已完成" if completed else "未完成",
+        "0秒" if not studied_seconds else "30分0秒", studied_seconds, "1", 3600,
         1800, remaining_seconds, "course-url", score, quiz_url, "-",
     )
 
 
-def test_scan_uses_unfinished_quiz_link_from_learning_record():
+def test_scan_uses_quiz_link_from_unfinished_course():
     result = QuizCourseScanner().scan(
         PageMustNotBeUsed(),
         [make_record("未完成", "https://example.test/mod/quiz/view.php?id=1")],
     )
     assert len(result.candidates) == 1
-    assert result.candidates[0].state == "未完成測驗"
+    assert result.candidates[0].state == "可開始答題"
+    assert result.candidates[0].eligible
 
 
 def test_scan_skips_finished_quiz_score():
@@ -47,11 +52,37 @@ def test_scan_skips_finished_quiz_score():
     assert result.candidates == ()
 
 
-def test_scan_skips_quiz_until_reading_time_is_reached():
+def test_scan_keeps_non_100_scores_without_guessing_pass_threshold():
     result = QuizCourseScanner().scan(
         PageMustNotBeUsed(),
-        [make_record("未完成", "https://example.test/mod/quiz/view.php?id=1", 61)],
+        [make_record("90", "https://example.test/mod/quiz/view.php?id=1", 61)],
+    )
+    assert len(result.candidates) == 1
+    assert result.candidates[0].score_text == "90"
+
+
+def test_scan_shows_zero_reading_time_but_blocks_entry():
+    result = QuizCourseScanner().scan(
+        PageMustNotBeUsed(),
+        [make_record("未完成", "https://example.test/mod/quiz/view.php?id=1", studied_seconds=0)],
+    )
+    assert len(result.candidates) == 1
+    assert not result.candidates[0].eligible
+    assert "閱讀時數為 0" in result.candidates[0].block_reason
+
+
+@pytest.mark.parametrize("score", ["100", "100分", "100.0", " 100 分 "])
+def test_scan_excludes_only_perfect_score(score):
+    result = QuizCourseScanner().scan(
+        PageMustNotBeUsed(),
+        [make_record(score, "https://example.test/mod/quiz/view.php?id=1")],
     )
     assert result.candidates == ()
-    assert "閱讀時數不足" in result.skipped[0]
-    assert "1分1秒" in result.skipped[0]
+
+
+def test_scan_skips_completed_course_even_with_quiz():
+    result = QuizCourseScanner().scan(
+        PageMustNotBeUsed(),
+        [make_record("80", "https://example.test/mod/quiz/view.php?id=1", completed=True)],
+    )
+    assert result.candidates == ()

@@ -34,7 +34,14 @@ class BrowserWorker(QObject):
     quiz_extracted = Signal(object)
     quiz_failed = Signal(str)
     quiz_filled = Signal(int)
+    quiz_scan_completed = Signal(object)
     quiz_queue_opened = Signal(object)
+    quiz_queue_completed = Signal(int)
+    enrollment_search_completed = Signal(object)
+    pocket_add_completed = Signal(object)
+    pocket_enroll_completed = Signal(object)
+    enrollment_progress = Signal(str)
+    enrollment_failed = Signal(str)
 
     def __init__(self, settings: AppSettings, logger: logging.Logger) -> None:
         super().__init__()
@@ -80,8 +87,16 @@ class BrowserWorker(QObject):
                 self._fill_quiz(payload)
             elif name == "scan_quizzes":
                 self._scan_quizzes(payload)
+            elif name == "start_quizzes":
+                self._start_quizzes(payload)
             elif name == "next_quiz":
                 self._next_quiz()
+            elif name == "search_enrollment":
+                self._search_enrollment(payload)
+            elif name == "add_to_pocket":
+                self._add_to_pocket(payload)
+            elif name == "enroll_pocket_all":
+                self._enroll_pocket_all()
 
     def submit(self, command: str) -> None:
         self.commands.put(command)
@@ -125,13 +140,23 @@ class BrowserWorker(QObject):
 
     def _fill_quiz(self, answers) -> None:
         try:
-            self.quiz_filled.emit(self.manager.fill_quiz_answers(answers))
+            count = self.manager.submit_quiz_answers(answers)
+            if self.manager.has_next_quiz():
+                self.quiz_queue_opened.emit(self.manager.open_next_quiz())
+            else:
+                self.quiz_queue_completed.emit(count)
         except BrowserManagerError as exc:
             self.quiz_failed.emit(str(exc))
 
     def _scan_quizzes(self, courses) -> None:
         try:
-            self.quiz_queue_opened.emit(self.manager.scan_and_open_quizzes(courses))
+            self.quiz_scan_completed.emit(self.manager.scan_quizzes(courses))
+        except BrowserManagerError as exc:
+            self.quiz_failed.emit(str(exc))
+
+    def _start_quizzes(self, candidates) -> None:
+        try:
+            self.quiz_queue_opened.emit(self.manager.start_quiz_queue(candidates))
         except BrowserManagerError as exc:
             self.quiz_failed.emit(str(exc))
 
@@ -140,6 +165,30 @@ class BrowserWorker(QObject):
             self.quiz_queue_opened.emit(self.manager.open_next_quiz())
         except BrowserManagerError as exc:
             self.quiz_failed.emit(str(exc))
+
+    def _search_enrollment(self, keywords) -> None:
+        try:
+            result = self.manager.search_enrollment_courses(
+                keywords, self.enrollment_progress.emit
+            )
+            self.enrollment_search_completed.emit(result)
+        except BrowserManagerError as exc:
+            self.enrollment_failed.emit(str(exc))
+
+    def _add_to_pocket(self, courses) -> None:
+        try:
+            result = self.manager.add_courses_to_pocket(
+                courses, self.enrollment_progress.emit
+            )
+            self.pocket_add_completed.emit(result)
+        except BrowserManagerError as exc:
+            self.enrollment_failed.emit(str(exc))
+
+    def _enroll_pocket_all(self) -> None:
+        try:
+            self.pocket_enroll_completed.emit(self.manager.enroll_all_from_pocket())
+        except BrowserManagerError as exc:
+            self.enrollment_failed.emit(str(exc))
 
     def _open_learning_records(self) -> None:
         try:
@@ -187,7 +236,7 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(960, 600)
         self.dashboard = DashboardPage()
         self.learning = LearningPage()
-        self.enrollment = EnrollmentPage()
+        self.enrollment = EnrollmentPage(settings.config_file)
         self.quiz = QuizPage()
         self.logs = LogsSettingsPage(str(settings.profile_dir))
         self._build_ui()
@@ -202,10 +251,20 @@ class MainWindow(QMainWindow):
         self.learning.skip_requested.connect(lambda: self.worker.submit("skip_course"))
         self.learning.stop_requested.connect(lambda: self.worker.submit("stop_queue"))
         self.learning.time_reached.connect(lambda: self.worker.submit("time_reached"))
-        self.quiz.extract_requested.connect(lambda: self.worker.submit("extract_quiz"))
         self.quiz.fill_requested.connect(lambda answers: self.worker.submit(("fill_quiz", answers)))
         self.quiz.scan_requested.connect(self._request_quiz_scan)
-        self.quiz.next_requested.connect(lambda: self.worker.submit("next_quiz"))
+        self.quiz.start_requested.connect(
+            lambda candidates: self.worker.submit(("start_quizzes", candidates))
+        )
+        self.enrollment.search_requested.connect(
+            lambda keywords: self.worker.submit(("search_enrollment", keywords))
+        )
+        self.enrollment.add_to_pocket_requested.connect(
+            lambda courses: self.worker.submit(("add_to_pocket", courses))
+        )
+        self.enrollment.enroll_all_requested.connect(
+            lambda: self.worker.submit("enroll_pocket_all")
+        )
         gui_log.message.connect(self.logs.append_log)
         self.statusBar().showMessage("就緒")
         self.logger.info("GUI 啟動完成")
@@ -272,7 +331,14 @@ class MainWindow(QMainWindow):
         self.worker.quiz_extracted.connect(self._quiz_extracted)
         self.worker.quiz_failed.connect(self._quiz_failed)
         self.worker.quiz_filled.connect(self._quiz_filled)
+        self.worker.quiz_scan_completed.connect(self._quiz_scan_completed)
         self.worker.quiz_queue_opened.connect(self._quiz_queue_opened)
+        self.worker.quiz_queue_completed.connect(self._quiz_queue_completed)
+        self.worker.enrollment_search_completed.connect(self._enrollment_search_completed)
+        self.worker.pocket_add_completed.connect(self._pocket_add_completed)
+        self.worker.pocket_enroll_completed.connect(self._pocket_enroll_completed)
+        self.worker.enrollment_progress.connect(self._enrollment_progress)
+        self.worker.enrollment_failed.connect(self._enrollment_failed)
         self.browser_thread.start()
 
     def _select_page(self, index: int) -> None:
@@ -323,11 +389,11 @@ class MainWindow(QMainWindow):
 
     @Slot()
     def _request_quiz_scan(self) -> None:
-        records = self.learning.selected_records()
+        records = self.learning.all_records()
         if not records:
-            self.quiz.show_error("請先在「學習紀錄／上課」掃描並勾選課程。")
+            self.quiz.show_error("請先在「學習紀錄／上課」完成掃描。")
             return
-        self.statusBar().showMessage("正在掃描未測驗課程…")
+        self.statusBar().showMessage("正在掃描未答題課程…")
         self.worker.submit(("scan_quizzes", records))
 
     @Slot(object)
@@ -359,8 +425,19 @@ class MainWindow(QMainWindow):
 
     @Slot(int)
     def _quiz_filled(self, count: int) -> None:
-        self.quiz.show_filled(count)
-        self.statusBar().showMessage(f"已填入 {count} 題，尚未送出")
+        self.statusBar().showMessage(f"已填入 {count} 題")
+
+    @Slot(object)
+    def _quiz_scan_completed(self, result) -> None:
+        self.quiz.show_candidates(result)
+        self.statusBar().showMessage(f"找到 {len(result.candidates)} 門待答題課程")
+        self._bring_to_front()
+
+    @Slot(int)
+    def _quiz_queue_completed(self, count: int) -> None:
+        self.quiz.show_completed(count)
+        self.statusBar().showMessage("測驗佇列已完成")
+        self._bring_to_front()
 
     @Slot(object)
     def _quiz_queue_opened(self, result) -> None:
@@ -372,6 +449,37 @@ class MainWindow(QMainWindow):
             f"測驗 {result['position']}/{result['total']}：{candidate.course_name}"
         )
         self._bring_to_front()
+
+    @Slot(object)
+    def _enrollment_search_completed(self, result) -> None:
+        self.enrollment.show_search_result(result)
+        self.statusBar().showMessage(f"選課搜尋完成：{len(result.courses)} 門")
+        self._bring_to_front()
+
+    @Slot(object)
+    def _pocket_add_completed(self, result) -> None:
+        self.enrollment.show_pocket_add_result(result)
+        self.statusBar().showMessage(
+            f"已加入選課口袋：{result.success_count}/{len(result.results)} 門"
+        )
+        self._bring_to_front()
+
+    @Slot(object)
+    def _pocket_enroll_completed(self, result) -> None:
+        self.enrollment.show_enroll_result(result)
+        self.statusBar().showMessage("選課口袋全部報名完成")
+        self._bring_to_front()
+
+    @Slot(str)
+    def _enrollment_progress(self, message: str) -> None:
+        self.enrollment.show_progress(message)
+        self.statusBar().showMessage(message)
+
+    @Slot(str)
+    def _enrollment_failed(self, message: str) -> None:
+        self.enrollment.show_error(message)
+        self.statusBar().showMessage("批次選課失敗")
+        self.logger.error(message)
 
 
     @Slot(str)

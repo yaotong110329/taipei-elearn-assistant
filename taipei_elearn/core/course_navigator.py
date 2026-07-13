@@ -63,6 +63,17 @@ class CourseNavigator:
             # 掃描得到的 SCORM URL 已含唯一活動 ID，直接導向最穩定。
             page.goto(entry.url, wait_until="domcontentloaded", timeout=30_000)
             if "/mod/scorm/player.php" not in page.url:
+                activity_id = re.search(r"[?&]id=(\d+)", entry.url)
+                retry_link = (
+                    page.locator(
+                        f'a[href*="/mod/scorm/view.php?id={activity_id.group(1)}"]:visible'
+                    )
+                    if activity_id else page.locator("a[href='__missing_scorm_id__']")
+                )
+                if retry_link.count() == 1:
+                    # 部分課程首次只初始化 SCORM 並返回課程頁；同入口再進一次才有 player。
+                    page.goto(entry.url, wait_until="domcontentloaded", timeout=30_000)
+            if "/mod/scorm/player.php" not in page.url:
                 raise CourseNavigationError(f"SCORM 未進入 player：{page.url}")
             page.wait_for_timeout(1000)
             self.media_started = self.ensure_media_started(page)

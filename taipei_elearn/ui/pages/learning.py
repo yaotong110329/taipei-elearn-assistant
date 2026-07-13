@@ -109,6 +109,9 @@ class LearningPage(QWidget):
                 selected.append(self._corrected(record))
         return selected
 
+    def all_records(self):
+        return [self._corrected(record) for record in getattr(self, "_records", [])]
+
     def _emit_start(self) -> None:
         self.start_requested.emit(self.selected_records())
 
