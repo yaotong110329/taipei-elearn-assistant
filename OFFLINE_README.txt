@@ -1,4 +1,4 @@
-臺北 e 大學習輔助程式 v2.0（Windows 64-bit）
+臺北 e 大學習輔助程式 v1.0.0（Windows 64-bit）
 
 安裝
 1. 完整解壓縮 ZIP，不能只取出 EXE。

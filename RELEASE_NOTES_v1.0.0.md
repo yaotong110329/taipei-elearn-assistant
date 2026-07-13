@@ -1,4 +1,4 @@
-# v2.0 - 自動答題與批次選課
+# v1.0.0 - 首個正式穩定版
 
 ## 新增
 
@@ -16,4 +16,4 @@
 
 ## 安裝
 
-下載 `TaipeiELearnAssistant-v2.0-win64.zip`，完整解壓縮後執行 `TaipeiELearnAssistant\TaipeiELearnAssistant.exe`。需要 Windows 10/11 64-bit 及正式版 Google Chrome，不需安裝 Python。
+下載 `TaipeiELearnAssistant-v1.0.0-win64.zip`，完整解壓縮後執行 `TaipeiELearnAssistant\TaipeiELearnAssistant.exe`。需要 Windows 10/11 64-bit 及正式版 Google Chrome，不需安裝 Python。
