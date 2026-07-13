@@ -85,8 +85,6 @@ class QuizExtractor:
             }
             """
         )
-        if "/mod/quiz/attempt.php" not in raw["url"]:
-            raise QuizExtractionError("目前不是測驗作答頁，請先進入測驗題目頁。")
         if raw["hasNext"]:
             raise QuizExtractionError("目前版本只支援單頁測驗。")
         if not raw["questions"]:

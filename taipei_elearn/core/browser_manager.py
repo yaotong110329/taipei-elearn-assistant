@@ -235,8 +235,23 @@ class BrowserManager:
             )
         with page.expect_navigation(wait_until="domcontentloaded", timeout=30_000):
             record_link.click()
-        if "/course/view.php" not in page.url:
-            raise BrowserManagerError(f"點擊未完成後未進入課程頁：{page.url}")
+
+        # 「未完成」可能進入課程頁，也可能直接進入測驗首頁。
+        # 導頁瞬間網址可能仍是舊值，因此以 DOM 當作完成條件。
+        transition = page.locator(
+            '.que:visible, '
+            'form[action*="startattempt.php"]:visible, '
+            f'a[href*="/mod/quiz/view.php?id={activity_id.group(1)}"] button:visible'
+        )
+        try:
+            transition.first.wait_for(state="visible", timeout=20_000)
+        except Exception as exc:
+            raise BrowserManagerError(f"點擊未完成後未出現測驗入口：{page.url}") from exc
+
+        if page.locator(".que:visible").count() or page.locator(
+            'form[action*="startattempt.php"]:visible'
+        ).count():
+            return
 
         formal_button = page.locator(
             f'a[href*="/mod/quiz/view.php?id={activity_id.group(1)}"] button:visible'
@@ -253,22 +268,33 @@ class BrowserManager:
             )
         with page.expect_navigation(wait_until="domcontentloaded", timeout=30_000):
             formal_button.click()
-        if "/mod/quiz/view.php" not in page.url and "/mod/quiz/attempt.php" not in page.url:
-            raise BrowserManagerError(f"點擊正式測驗後未進入測驗頁：{page.url}")
+        quiz_page = page.locator(
+            '.que:visible, form[action*="startattempt.php"]:visible'
+        )
+        try:
+            quiz_page.first.wait_for(state="visible", timeout=20_000)
+        except Exception as exc:
+            raise BrowserManagerError(f"點擊正式測驗後未進入測驗頁：{page.url}") from exc
 
     @staticmethod
     def _enter_quiz_attempt(page) -> None:
-        if "/mod/quiz/attempt.php" in page.url and page.locator(".que").count():
+        if page.locator(".que:visible").count():
             return
         button = page.locator(
             'form[action*="startattempt.php"] button[type="submit"]:visible, '
             'form[action*="startattempt.php"] input[type="submit"]:visible'
         )
+        try:
+            button.first.wait_for(state="visible", timeout=20_000)
+        except Exception as exc:
+            raise BrowserManagerError("測驗頁缺少開始／繼續作答按鈕。") from exc
         if button.count() != 1:
             raise BrowserManagerError("測驗頁缺少唯一的開始／繼續作答按鈕。")
         button.click()
-        page.wait_for_timeout(500)
-        if "/mod/quiz/attempt.php" not in page.url:
+        try:
+            page.locator(".que:visible").first.wait_for(state="visible", timeout=5_000)
+            return
+        except Exception:
             confirm = page.locator('.modal-dialog button, [role="dialog"] button').filter(
                 has_text=re.compile(r"開始作答|start attempt", re.I)
             )
@@ -277,8 +303,10 @@ class BrowserManager:
                 confirm.last.click()
             elif confirm_count > 1:
                 raise BrowserManagerError("開始作答確認按鈕不唯一，停止操作。")
-        page.wait_for_url(re.compile(r"/mod/quiz/attempt\.php"), timeout=20_000)
-        page.locator(".que").first.wait_for(state="visible", timeout=20_000)
+        try:
+            page.locator(".que:visible").first.wait_for(state="visible", timeout=20_000)
+        except Exception as exc:
+            raise BrowserManagerError(f"點擊作答後未出現測驗題目：{page.url}") from exc
 
     @staticmethod
     def _leave_scorm_player(page) -> None:
