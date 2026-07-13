@@ -20,6 +20,9 @@ class BrowserManager:
     LEARNING_RECORD_SSO_URL = (
         "https://elearning.taipei/mpage/sso_moodle?redirectPage=courserecord"
     )
+    QUESTIONNAIRE_MARKERS = re.compile(
+        r"問卷|滿意度|questionnaire|survey|feedback", re.I
+    )
 
     def __init__(self, profile_dir: Path, logger: logging.Logger) -> None:
         self.profile_dir = profile_dir
@@ -92,28 +95,25 @@ class BrowserManager:
     def start_course(self, course: CourseRecord) -> dict[str, str]:
         if not self._context:
             raise BrowserManagerError("Chrome 尚未連線。")
-        old_page = self._context.pages[-1]
+        old_page = self._select_course_page()
         old_is_player = (
             "/mod/scorm/player.php" in old_page.url
             or old_page.locator("#scorm_object, #scorm_layout, iframe[id*='scorm'], iframe[name*='scorm']").count() > 0
         )
         if old_is_player:
-            exit_link = old_page.locator('a[href*="transformation.php?fun=courseview"]')
-            if exit_link.count() < 1:
-                raise BrowserManagerError("目前 player 缺少平台正式離開入口，停止換課。")
-            exit_url = urljoin(old_page.url, exit_link.first.get_attribute("href"))
-            old_page.goto(exit_url, wait_until="domcontentloaded", timeout=30_000)
-            self.logger.info("已透過平台正式離開上一門課程 url=%s", old_page.url)
-            page = old_page
+            page = self._leave_course_and_close_questionnaire(old_page)
         else:
             page = old_page
         try:
-            navigator = CourseNavigator()
-            entries = navigator.open_course(page, course.course_url)
-            entry = entries[0]
-            navigator.enter_material(page, entry)
-            if not navigator.is_player(page):
-                navigator.penetrate_to_player(page)
+            try:
+                page, navigator, entry = self._enter_course(page, course)
+            except Exception as exc:
+                if not self._is_target_closed_error(exc):
+                    raise
+                self.logger.warning("換課時原分頁已關閉，重新選取主頁後重試一次")
+                page, navigator, entry = self._enter_course(
+                    self._select_course_page(), course
+                )
             self.logger.info(
                 "已進入課程=%s 教材=%s strategy=%s player=%s media_started=%s",
                 course.name, entry.title, entry.strategy, navigator.is_player(page), navigator.media_started,
@@ -125,14 +125,127 @@ class BrowserManager:
         except Exception as exc:
             raise BrowserManagerError(f"進入課程失敗：{str(exc).splitlines()[0]}") from exc
 
+    @staticmethod
+    def _is_target_closed_error(exc: Exception) -> bool:
+        text = str(exc).lower()
+        return "target page, context or browser has been closed" in text or "page closed" in text
+
+    def _enter_course(self, page, course: CourseRecord):
+        navigator = CourseNavigator()
+        self.logger.info("換課：開啟課程頁 course=%s url=%s", course.name, course.course_url)
+        entries = navigator.open_course(page, course.course_url)
+        entry = entries[0]
+        self.logger.info("換課：開啟教材 title=%s url=%s", entry.title, entry.url)
+        navigator.enter_material(page, entry)
+        player_page = self._find_player_page()
+        if player_page is not None:
+            page = player_page
+        if not navigator.is_player(page):
+            navigator.penetrate_to_player(page)
+        return page, navigator, entry
+
+    def _find_player_page(self):
+        for page in reversed(tuple(self._context.pages)):
+            if page.is_closed():
+                continue
+            try:
+                if CourseNavigator.is_player(page):
+                    return page
+            except Exception:
+                continue
+        return None
+
+    def _select_course_page(self):
+        pages = [page for page in self._context.pages if not page.is_closed()]
+        if not pages:
+            raise BrowserManagerError("Chrome 沒有可操作頁面。")
+        for page in reversed(pages):
+            try:
+                if (
+                    "/mod/scorm/player.php" in page.url
+                    or page.locator(
+                        "#scorm_object, #scorm_layout, iframe[id*='scorm'], iframe[name*='scorm']"
+                    ).count() > 0
+                ):
+                    return page
+            except Exception:
+                continue
+        for page in reversed(pages):
+            if not self._looks_like_questionnaire(page):
+                return page
+        return pages[-1]
+
+    def _leave_course_and_close_questionnaire(self, page):
+        exit_link = page.locator('a[href*="transformation.php?fun=courseview"]')
+        if exit_link.count() < 1:
+            raise BrowserManagerError("目前 player 缺少平台正式離開入口，停止換課。")
+        exit_url = urljoin(page.url, exit_link.first.get_attribute("href"))
+        page.goto(exit_url, wait_until="domcontentloaded", timeout=30_000)
+
+        # 問卷可能延遲開啟成新分頁或同頁 modal；等待並清掉後才換課。
+        closed = 0
+        for _ in range(12):
+            if page.is_closed():
+                break
+            try:
+                page.wait_for_timeout(250)
+                self._dismiss_questionnaire_modal(page)
+            except Exception as exc:
+                if self._is_target_closed_error(exc):
+                    break
+                raise
+            for popup in tuple(self._context.pages):
+                if popup is page or popup.is_closed():
+                    continue
+                if self._looks_like_questionnaire(popup):
+                    self.logger.info("關閉問卷視窗 url=%s", popup.url)
+                    popup.close()
+                    closed += 1
+        self.logger.info("已正式離開上一門課程，關閉問卷視窗=%s", closed)
+        if page.is_closed():
+            self.logger.info("離開後原播放器分頁已關閉，改用目前主頁")
+            return self._select_course_page()
+        return page
+
+    @classmethod
+    def _looks_like_questionnaire(cls, page) -> bool:
+        try:
+            return bool(cls.QUESTIONNAIRE_MARKERS.search(f"{page.url} {page.title()}"))
+        except Exception:
+            return False
+
+    @classmethod
+    def _dismiss_questionnaire_modal(cls, page) -> bool:
+        dialogs = page.locator(
+            '[role="dialog"]:visible, .modal.show:visible, .modal-dialog:visible'
+        ).filter(has_text=cls.QUESTIONNAIRE_MARKERS)
+        if dialogs.count() < 1:
+            return False
+        dialog = dialogs.last
+        close_button = dialog.locator(
+            'button[data-dismiss="modal"]:visible, button[data-bs-dismiss="modal"]:visible, '
+            'button.close:visible, .btn-close:visible, '
+            'button[aria-label*="close" i]:visible, button[aria-label*="關閉"]:visible'
+        )
+        if close_button.count() < 1:
+            close_button = dialog.locator("button:visible").filter(
+                has_text=re.compile(r"關閉|取消|稍後|略過|×|close", re.I)
+            )
+        if close_button.count() < 1:
+            return False
+        close_button.last.click()
+        return True
+
     def open_learning_records(self) -> str:
         if not self._context:
             raise BrowserManagerError("Chrome 尚未連線。")
         pages = self._context.pages
         if not pages:
             raise BrowserManagerError("Chrome 沒有可操作頁面。")
-        page = pages[-1]
+        page = self._select_course_page()
         try:
+            if CourseNavigator.is_player(page):
+                page = self._leave_course_and_close_questionnaire(page)
             if page.locator("#applySelection").count() == 1:
                 self._prepare_unfinished_records(page)
                 return page.url

@@ -59,16 +59,9 @@ class CourseNavigator:
 
     def enter_material(self, page, entry: MaterialEntry) -> None:
         if entry.strategy == "scorm":
-            parsed_id = re.search(r"[?&]id=(\d+)", entry.url)
-            locator = (
-                page.locator(f'a[href*="/mod/scorm/view.php?id={parsed_id.group(1)}"]')
-                if parsed_id else page.locator('a[href*="/mod/scorm/view.php"]')
-            )
-            if locator.count() == 1:
-                with page.expect_navigation(wait_until="domcontentloaded", timeout=30_000):
-                    locator.click()
-            else:
-                page.goto(entry.url, wait_until="domcontentloaded", timeout=30_000)
+            # 平台有些課程以新分頁開 player；等待原頁 navigation 會永久卡住。
+            # 掃描得到的 SCORM URL 已含唯一活動 ID，直接導向最穩定。
+            page.goto(entry.url, wait_until="domcontentloaded", timeout=30_000)
             if "/mod/scorm/player.php" not in page.url:
                 raise CourseNavigationError(f"SCORM 未進入 player：{page.url}")
             page.wait_for_timeout(1000)

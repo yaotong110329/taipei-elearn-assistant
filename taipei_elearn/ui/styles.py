@@ -2,7 +2,7 @@ APP_STYLE = """
 QWidget { background: #f4f6f8; color: #17202a; font-family: "Microsoft JhengHei UI"; font-size: 14px; }
 QMainWindow, QScrollArea, QAbstractScrollArea::viewport { background: #f4f6f8; }
 QFrame#sidebar { background: #18324a; }
-QLabel#brand { color: white; font-size: 20px; font-weight: 700; padding: 8px; }
+QFrame#sidebar QLabel#brand { background: #18324a; color: #ffffff; font-size: 20px; font-weight: 700; padding: 8px; }
 QPushButton { min-height: 38px; padding: 0 14px; border: 1px solid #9aa8b5; border-radius: 5px; background: white; }
 QPushButton:hover { background: #e8f1f8; border-color: #2878a9; }
 QPushButton:pressed { background: #d4e6f1; }

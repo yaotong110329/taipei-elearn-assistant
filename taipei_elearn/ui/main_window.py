@@ -21,6 +21,8 @@ from taipei_elearn.ui.pages.quiz import QuizPage
 
 
 class BrowserWorker(QObject):
+    # 換課流程驗證期間，每堂固定 15 秒；穩定後再移除此覆蓋值。
+    COURSE_RUNTIME_OVERRIDE_SECONDS = 15
     completed = Signal(object)
     learning_scan_completed = Signal(object)
     learning_scan_failed = Signal(str)
@@ -38,6 +40,7 @@ class BrowserWorker(QObject):
 
     def __init__(self, settings: AppSettings, logger: logging.Logger) -> None:
         super().__init__()
+        self.logger = logger
         self.manager = BrowserManager(settings.profile_dir, logger)
         self.commands: queue.Queue[object] = queue.Queue()
         self.course_queue = CourseQueueService()
@@ -99,10 +102,12 @@ class BrowserWorker(QObject):
             result = self.manager.start_course(snapshot.current)
             result["position"] = snapshot.current_index + 1
             result["total"] = snapshot.total
-            result["remaining_seconds"] = snapshot.current.remaining_seconds
+            result["remaining_seconds"] = self.COURSE_RUNTIME_OVERRIDE_SECONDS
+            result["runtime_override"] = True
             self.course_started.emit(result)
         except BrowserManagerError as exc:
             blocked = self.course_queue.block(str(exc))
+            self.logger.error("%s", exc)
             self.course_failed.emit(str(exc))
             self.queue_state_changed.emit(blocked.state.value, blocked.reason)
 
@@ -194,6 +199,7 @@ class MainWindow(QMainWindow):
         self.dashboard.detect_login_requested.connect(self._request_detect)
         self.dashboard.records_button.clicked.connect(self._request_open_learning_records)
         self.learning.scan_requested.connect(self._request_learning_scan)
+        self.learning.records_requested.connect(self._request_return_learning_records)
         self.learning.start_requested.connect(self._request_start_course)
         self.learning.pause_requested.connect(lambda: self.worker.submit("pause_queue"))
         self.learning.skip_requested.connect(lambda: self.worker.submit("skip_course"))
@@ -303,6 +309,13 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("正在進入學習紀錄…")
         self.worker.submit("records")
 
+    @Slot()
+    def _request_return_learning_records(self) -> None:
+        self.learning.banner.show_state("loading", "正在離開目前課程並回到學習紀錄…")
+        self.statusBar().showMessage("正在回到學習紀錄…")
+        self.worker.submit("stop_queue")
+        self.worker.submit("records")
+
     @Slot(object)
     def _request_start_course(self, records) -> None:
         if not records:
@@ -376,6 +389,7 @@ class MainWindow(QMainWindow):
     def _learning_records_open_failed(self, message: str) -> None:
         self.dashboard.set_busy(False)
         self.dashboard.banner.show_state("error", message)
+        self.learning.show_error(message)
         self.statusBar().showMessage("進入學習紀錄失敗")
         self.logger.error(message)
 

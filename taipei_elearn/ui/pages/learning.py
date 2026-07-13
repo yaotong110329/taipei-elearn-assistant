@@ -11,6 +11,7 @@ from taipei_elearn.ui.widgets import PageHeader, StateBanner, make_button, make_
 
 class LearningPage(QWidget):
     scan_requested = Signal()
+    records_requested = Signal()
     start_requested = Signal(object)
     pause_requested = Signal()
     skip_requested = Signal()
@@ -20,9 +21,9 @@ class LearningPage(QWidget):
     def __init__(self) -> None:
         super().__init__()
         layout = QVBoxLayout(self)
-        layout.addWidget(PageHeader("學習紀錄／上課", "掃描平台學習紀錄；階段 2 不執行自動上課。"))
+        layout.addWidget(PageHeader("學習紀錄／上課", "掃描學習紀錄並依序執行已勾選課程。"))
         self.banner = StateBanner()
-        self.banner.show_state("empty", "登入後會自動選擇未完成、更新課程並改為每頁 50 筆，再按「重新掃描」。")
+        self.banner.show_state("empty", "登入後會自動選擇未完成、更新課程並改為每頁 50 筆，再按「開始掃描」。")
         layout.addWidget(self.banner)
         self.progress_label = QLabel("目前：尚未開始")
         self.progress_label.setWordWrap(True)
@@ -41,12 +42,13 @@ class LearningPage(QWidget):
         layout.addWidget(self.table, 1)
         actions = QHBoxLayout()
         self.buttons = {}
-        for text in ("重新掃描", "✏️ 補正", "開始上課", "暫停", "跳過", "停止"):
+        for text in ("開始掃描", "回到學習紀錄", "✏️ 補正", "開始上課", "暫停", "跳過", "停止"):
             button = make_button(text, text == "開始上課")
-            button.setEnabled(text == "重新掃描")
+            button.setEnabled(text in {"開始掃描", "回到學習紀錄"})
             self.buttons[text] = button
             actions.addWidget(button)
-        self.buttons["重新掃描"].clicked.connect(self.scan_requested)
+        self.buttons["開始掃描"].clicked.connect(self.scan_requested)
+        self.buttons["回到學習紀錄"].clicked.connect(self.records_requested)
         self.buttons["✏️ 補正"].clicked.connect(self._open_correction_dialog)
         self.buttons["✏️ 補正"].setEnabled(False)
         self.buttons["開始上課"].clicked.connect(self._emit_start)
@@ -57,7 +59,7 @@ class LearningPage(QWidget):
         layout.addLayout(actions)
 
     def set_busy(self, busy: bool) -> None:
-        self.buttons["重新掃描"].setEnabled(not busy)
+        self.buttons["開始掃描"].setEnabled(not busy)
         if busy:
             self.banner.show_state("loading", "正在掃描未完成課程… Chrome 可能短暫出現在前景。")
 
@@ -116,7 +118,8 @@ class LearningPage(QWidget):
             "success",
             f"執行 {result.get('position', 1)} / {result.get('total', 1)}：{result['course']}\n"
             f"教材：{result['material']}"
-            f"{'｜影片已開始播放' if result.get('media_started') else ''}",
+            f"{'｜影片已開始播放' if result.get('media_started') else ''}"
+            f"{'｜換課測試：15 秒' if result.get('runtime_override') else ''}",
         )
         self.buttons["開始上課"].setEnabled(False)
         self.buttons["暫停"].setEnabled(True)

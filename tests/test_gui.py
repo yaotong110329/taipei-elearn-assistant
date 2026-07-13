@@ -8,6 +8,7 @@ from PySide6.QtWidgets import QApplication
 from taipei_elearn.ui.pages.enrollment import EnrollmentPage
 from taipei_elearn.ui.pages.learning import LearningPage
 from taipei_elearn.ui.pages.quiz import QuizPage
+from taipei_elearn.ui.styles import APP_STYLE
 from taipei_elearn.core.quiz_extractor import QuizOption, QuizQuestion, QuizSnapshot
 
 
@@ -21,6 +22,23 @@ def test_tables_support_scanned_and_mock_rows():
     learning.close()
     enrollment.close()
     app.processEvents()
+
+
+def test_learning_actions_use_requested_labels_and_backup_signal():
+    app = QApplication.instance() or QApplication([])
+    page = LearningPage()
+    requested = []
+    page.records_requested.connect(lambda: requested.append(True))
+    assert "開始掃描" in page.buttons
+    assert "重新掃描" not in page.buttons
+    page.buttons["回到學習紀錄"].click()
+    assert requested == [True]
+    page.close()
+
+
+def test_sidebar_brand_has_explicit_dark_background_and_white_text():
+    assert "QFrame#sidebar QLabel#brand" in APP_STYLE
+    assert "color: #ffffff" in APP_STYLE
 
 
 def test_course_progress_countdown_display():
