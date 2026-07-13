@@ -21,8 +21,6 @@ from taipei_elearn.ui.pages.quiz import QuizPage
 
 
 class BrowserWorker(QObject):
-    # 換課流程驗證期間，每堂固定 15 秒；穩定後再移除此覆蓋值。
-    COURSE_RUNTIME_OVERRIDE_SECONDS = 15
     completed = Signal(object)
     learning_scan_completed = Signal(object)
     learning_scan_failed = Signal(str)
@@ -102,8 +100,7 @@ class BrowserWorker(QObject):
             result = self.manager.start_course(snapshot.current)
             result["position"] = snapshot.current_index + 1
             result["total"] = snapshot.total
-            result["remaining_seconds"] = self.COURSE_RUNTIME_OVERRIDE_SECONDS
-            result["runtime_override"] = True
+            result["remaining_seconds"] = snapshot.current.remaining_seconds
             self.course_started.emit(result)
         except BrowserManagerError as exc:
             blocked = self.course_queue.block(str(exc))

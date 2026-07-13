@@ -2,6 +2,8 @@ import logging
 
 from taipei_elearn.core.browser_manager import BrowserManager
 from taipei_elearn.core.course_navigator import CourseNavigator, MaterialEntry
+from taipei_elearn.core.learning_record_scanner import CourseRecord
+from taipei_elearn.support.settings import AppSettings
 from taipei_elearn.ui.main_window import BrowserWorker
 
 
@@ -119,8 +121,26 @@ def test_leave_course_closes_questionnaire_already_open_before_transition():
     assert questionnaire.closed
 
 
-def test_course_runtime_is_temporarily_overridden_to_15_seconds():
-    assert BrowserWorker.COURSE_RUNTIME_OVERRIDE_SECONDS == 15
+def test_worker_uses_scanned_remaining_seconds_without_test_override(tmp_path):
+    settings = AppSettings(
+        tmp_path, tmp_path / "profile", tmp_path / "logs", tmp_path / "settings.json"
+    )
+    worker = BrowserWorker(settings, logging.getLogger("test-real-duration"))
+
+    class Manager:
+        @staticmethod
+        def start_course(course):
+            return {"course": course.name, "material": "教材", "url": course.course_url}
+
+    worker.manager = Manager()
+    record = CourseRecord(
+        "1", "課程", False, "未完成", "0秒", 0, "1", 3600, 1800, 1234,
+        "https://example.test/course/view.php?id=1",
+    )
+    emitted = []
+    worker.course_started.connect(emitted.append)
+    worker._open_current(worker.course_queue.start([record]))
+    assert emitted[0]["remaining_seconds"] == 1234
 
 
 class DirectScormPage:

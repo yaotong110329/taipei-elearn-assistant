@@ -118,8 +118,7 @@ class LearningPage(QWidget):
             "success",
             f"執行 {result.get('position', 1)} / {result.get('total', 1)}：{result['course']}\n"
             f"教材：{result['material']}"
-            f"{'｜影片已開始播放' if result.get('media_started') else ''}"
-            f"{'｜換課測試：15 秒' if result.get('runtime_override') else ''}",
+            f"{'｜影片已開始播放' if result.get('media_started') else ''}",
         )
         self.buttons["開始上課"].setEnabled(False)
         self.buttons["暫停"].setEnabled(True)
