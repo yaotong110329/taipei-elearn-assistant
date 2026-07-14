@@ -1,6 +1,8 @@
 from contextlib import nullcontext
 
-from taipei_elearn.core.enrollment_service import EnrollmentCourse, EnrollmentService
+from taipei_elearn.core.enrollment_service import (
+    EnrollmentCourse, EnrollmentKeywordRequest, EnrollmentService,
+)
 
 
 class FakeSearchLocator:
@@ -94,6 +96,25 @@ def test_each_keyword_stops_after_five_and_excludes_zero_hours():
     assert result.pages_scanned == 1
     assert len(result.courses) == 5
     assert {course.course_id for course in result.courses} == {"1", "2", "3", "4", "5"}
+
+
+def test_each_keyword_uses_its_configured_course_limit():
+    page = FakeSearchPage()
+    page.results = {
+        "環境教育": [[
+            {
+                "courseId": str(index), "title": f"課程{index}",
+                "hours": "認證時數1小時", "detailUrl": f"u{index}",
+                "status": "直接報名",
+            }
+            for index in range(1, 6)
+        ]]
+    }
+    result = EnrollmentService().search(
+        page, [EnrollmentKeywordRequest("環境教育", 2)]
+    )
+    assert len(result.courses) == 2
+    assert {course.course_id for course in result.courses} == {"1", "2"}
 
 
 class FakeResponse:

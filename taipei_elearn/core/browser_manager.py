@@ -5,7 +5,7 @@ from urllib.parse import urljoin
 
 from taipei_elearn.core.session_detector import SessionDetector, SessionResult
 from taipei_elearn.core.learning_record_scanner import LearningRecordScanner, ScanResult
-from taipei_elearn.core.course_navigator import CourseNavigator
+from taipei_elearn.core.course_navigator import CourseNavigationError, CourseNavigator
 from taipei_elearn.core.learning_record_scanner import CourseRecord
 from taipei_elearn.core.quiz_extractor import QuizExtractor, QuizSnapshot
 from taipei_elearn.core.quiz_course_scanner import QuizCandidate, QuizCourseScanner
@@ -151,12 +151,16 @@ class BrowserManager:
         entries = navigator.open_course(page, course.course_url)
         entry = entries[0]
         self.logger.info("換課：開啟教材 title=%s url=%s", entry.title, entry.url)
-        navigator.enter_material(page, entry)
+        page = navigator.enter_material(page, entry)
         player_page = self._find_player_page()
         if player_page is not None:
             page = player_page
         if not navigator.is_player(page):
-            navigator.penetrate_to_player(page)
+            page = navigator.penetrate_to_player(page)
+        if not navigator.is_player(page):
+            raise CourseNavigationError(f"教材穿透後仍未進入 player：{page.url}")
+        if not navigator.media_started:
+            navigator.media_started = navigator.ensure_media_started(page)
         return page, navigator, entry
 
     def _find_player_page(self):
@@ -287,7 +291,7 @@ class BrowserManager:
         except Exception as exc:
             raise BrowserManagerError(f"擷取測驗失敗：{str(exc).splitlines()[0]}") from exc
 
-    def search_enrollment_courses(self, keywords: list[str], progress=None):
+    def search_enrollment_courses(self, keywords, progress=None):
         page = self._active_page_for_enrollment()
         try:
             return EnrollmentService().search(page, keywords, progress)
@@ -525,17 +529,49 @@ class BrowserManager:
         except Exception as exc:
             raise BrowserManagerError(f"填入答案失敗：{str(exc).splitlines()[0]}") from exc
 
-    def submit_quiz_answers(self, answers: dict[int, tuple[str, ...]]) -> int:
+    def submit_quiz_answers(self, answers: dict[int, tuple[str, ...]]) -> dict:
         count = self.fill_quiz_answers(answers)
         page = self._context.pages[-1]
         try:
             self._submit_quiz_attempt(page)
+            score = self._read_quiz_score(page)
             self.logger.info("測驗答案已自動送出，共 %s 題", count)
-            return count
+            return {"count": count, "score": score, "url": page.url}
         except BrowserManagerError:
             raise
         except Exception as exc:
             raise BrowserManagerError(f"送出測驗失敗：{str(exc).splitlines()[0]}") from exc
+
+    @staticmethod
+    def _read_quiz_score(page) -> str:
+        for table_selector in (
+            ".quizreviewsummary",
+            "table.quizattemptsummary",
+            "table.generaltable",
+        ):
+            try:
+                row = page.locator(f"{table_selector} tr").filter(
+                    has_text=re.compile(r"成績|分數")
+                )
+                if row.count():
+                    cells = row.first.locator("td")
+                    if cells.count():
+                        text = re.sub(r"\s+", " ", cells.last.inner_text()).strip()
+                        if text:
+                            return text
+            except Exception:
+                continue
+        try:
+            body_text = page.locator("body").inner_text()
+            match = re.search(
+                r"(?:成績|分數)\s*[:：]?\s*([^\r\n]{1,60})",
+                body_text,
+            )
+            if match:
+                return re.sub(r"\s+", " ", match.group(1)).strip()
+        except Exception:
+            pass
+        return "平台未顯示"
 
     @staticmethod
     def _submit_quiz_attempt(page) -> None:

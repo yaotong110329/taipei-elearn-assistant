@@ -78,6 +78,10 @@ class WorkerManager:
     def open_next_quiz():
         return {"candidate": "next"}
 
+    @staticmethod
+    def open_learning_records():
+        return "https://example.test/learning-records?status=unfinished"
+
 
 def make_worker(tmp_path, has_next):
     settings = AppSettings(
@@ -91,14 +95,43 @@ def make_worker(tmp_path, has_next):
 def test_worker_automatically_opens_next_quiz_after_submit(tmp_path):
     worker = make_worker(tmp_path, True)
     opened = []
+    submitted = []
     worker.quiz_queue_opened.connect(opened.append)
+    worker.quiz_submitted.connect(submitted.append)
     worker._fill_quiz({1: ("A",)})
     assert opened == [{"candidate": "next"}]
+    assert submitted == [{"count": 1, "score": "平台未顯示", "has_next": True}]
 
 
 def test_worker_reports_queue_completed_after_last_submit(tmp_path):
     worker = make_worker(tmp_path, False)
     completed = []
+    records_opened = []
     worker.quiz_queue_completed.connect(completed.append)
+    worker.learning_records_opened.connect(records_opened.append)
     worker._fill_quiz({1: ("A",), 2: ("B",)})
     assert completed == [2]
+    assert records_opened == ["https://example.test/learning-records?status=unfinished"]
+
+
+class ScoreLocator:
+    def __init__(self, selector):
+        self.selector = selector
+
+    def filter(self, **_kwargs):
+        return self
+
+    def count(self):
+        return 0
+
+    def inner_text(self):
+        return "測驗完成\n成績：80 / 100\n回顧"
+
+
+class ScorePage:
+    def locator(self, selector):
+        return ScoreLocator(selector)
+
+
+def test_reads_quiz_score_from_review_page_text():
+    assert BrowserManager._read_quiz_score(ScorePage()) == "80 / 100"

@@ -1,7 +1,7 @@
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
-    QApplication, QHBoxLayout, QLabel, QPlainTextEdit, QTableWidgetItem,
+    QApplication, QHBoxLayout, QLabel, QMessageBox, QPlainTextEdit, QTableWidgetItem,
     QVBoxLayout, QWidget,
 )
 
@@ -48,28 +48,18 @@ class QuizPage(QWidget):
         self.course_table.setMinimumHeight(150)
         layout.addWidget(self.course_table, 1)
 
-        layout.addWidget(QLabel("AI 提示詞（進入測驗後自動複製）"))
-        self.prompt_editor = QPlainTextEdit()
-        self.prompt_editor.setReadOnly(True)
-        self.prompt_editor.setPlaceholderText("開始答題後，題目與固定提示詞會顯示於此並複製到剪貼簿。")
-        self.prompt_editor.setMinimumHeight(160)
-        layout.addWidget(self.prompt_editor, 1)
-
-        layout.addWidget(QLabel("貼上 AI 回傳答案"))
-        self.answer_editor = QPlainTextEdit()
-        self.answer_editor.setPlaceholderText("[[ANSWERS]]1=A;2=BD;3=C[[/ANSWERS]]")
-        self.answer_editor.setMaximumHeight(90)
-        layout.addWidget(self.answer_editor)
+        layout.addWidget(QLabel("目前步驟"))
+        self.step_editor = QPlainTextEdit()
+        self.step_editor.setReadOnly(True)
+        self.step_editor.setPlaceholderText("開始答題後，這裡會顯示目前處理步驟。")
+        self.step_editor.setMinimumHeight(180)
+        layout.addWidget(self.step_editor, 1)
 
         answer_actions = QHBoxLayout()
-        self.clipboard_button = make_button("從剪貼簿讀取並繼續", True)
-        self.clipboard_button.clicked.connect(self._read_clipboard_and_continue)
-        self.continue_button = make_button("驗證答案並繼續")
-        self.continue_button.clicked.connect(self._validate_and_submit)
+        self.clipboard_button = make_button("從剪貼簿讀取送出答案", True)
+        self.clipboard_button.clicked.connect(self._read_clipboard_and_submit)
         self.clipboard_button.setEnabled(False)
-        self.continue_button.setEnabled(False)
         answer_actions.addWidget(self.clipboard_button)
-        answer_actions.addWidget(self.continue_button)
         answer_actions.addStretch()
         layout.addLayout(answer_actions)
 
@@ -77,6 +67,8 @@ class QuizPage(QWidget):
         self._candidates = []
         self.snapshot = None
         self.course_table.setRowCount(0)
+        self.step_editor.clear()
+        self._append_step("掃描未答題課程中")
         self.scan_button.setEnabled(False)
         self.start_button.setEnabled(False)
         self.banner.show_state("loading", "正在掃描有測驗項目、課程未完成且成績不是 100 分的課程…")
@@ -106,11 +98,11 @@ class QuizPage(QWidget):
         if blocked:
             detail += f" {blocked} 門閱讀時數為 0 或無法判斷，不能勾選進入測驗。"
         self.banner.show_state("success", detail)
+        self._append_step(f"掃描完成：找到 {len(self._candidates)} 門待答題課程")
         self.question_count.setText("請勾選後開始答題")
         self.scan_button.setEnabled(True)
         self.start_button.setEnabled(eligible > 0)
         self.clipboard_button.setEnabled(False)
-        self.continue_button.setEnabled(False)
 
     def selected_candidates(self):
         selected = []
@@ -127,6 +119,8 @@ class QuizPage(QWidget):
             return
         self.scan_button.setEnabled(False)
         self.start_button.setEnabled(False)
+        self.step_editor.clear()
+        self._append_step("進入第一門測驗")
         self.banner.show_state("loading", "正在進入第一門測驗並擷取題目…")
         self.start_requested.emit(selected)
 
@@ -135,49 +129,61 @@ class QuizPage(QWidget):
         total: int = 0, course: str = "",
     ) -> None:
         self.snapshot = snapshot
+        queue_text = f"測驗 {position}/{total}" if total else "目前測驗"
+        course_text = f"：{course}" if course else ""
+        self._append_step(f"{queue_text}{course_text}")
+        self._append_step("複製題目中")
         prompt = build_quiz_prompt(snapshot)
-        self.prompt_editor.setPlainText(prompt)
-        self.answer_editor.clear()
         QApplication.clipboard().setText(prompt)
-        queue_text = f"｜測驗 {position}/{total}" if total else ""
-        self.question_count.setText(f"共 {len(snapshot.questions)} 題{queue_text}")
+        self._append_step("題目複製成功，等待 AI 答案")
+        count_text = f"｜測驗 {position}/{total}" if total else ""
+        self.question_count.setText(f"共 {len(snapshot.questions)} 題{count_text}")
         self.clipboard_button.setEnabled(True)
-        self.continue_button.setEnabled(True)
         self.banner.show_state(
             "success",
             f"{course + chr(10) if course else ''}已擷取並複製 {len(snapshot.questions)} 題。"
             "請貼給 AI，再將答案複製回來。",
         )
+        QMessageBox.information(
+            self,
+            "題目複製成功",
+            "題目複製成功，請貼給 AI（ChatGPT、Claude 等）。\n"
+            "取得答案後，複製答案並回到本程式送出。",
+        )
 
-    def _read_clipboard_and_continue(self) -> None:
-        self.answer_editor.setPlainText(QApplication.clipboard().text())
-        self._validate_and_submit()
-
-    def _validate_and_submit(self) -> None:
+    def _read_clipboard_and_submit(self) -> None:
         if self.snapshot is None:
             self.show_error("尚未進入測驗。")
             return
+        self._append_step("讀取剪貼簿答案")
         try:
             answers = parse_and_validate_answers(
-                self.answer_editor.toPlainText(), self.snapshot
+                QApplication.clipboard().text(), self.snapshot
             )
         except AnswerValidationError as exc:
+            self._append_step(f"答案格式錯誤：{exc}")
             self.banner.show_state("error", str(exc))
             return
         self.clipboard_button.setEnabled(False)
-        self.continue_button.setEnabled(False)
+        self._append_step("送出答案中")
         self.banner.show_state(
             "loading", f"答案驗證通過，共 {len(answers)} 題。正在自動填入並送出…"
         )
         self.fill_requested.emit(answers)
+
+    def show_submission(self, result) -> None:
+        self._append_step("已送出")
+        self._append_step(f"分數：{result.get('score') or '平台未顯示'}")
+        if result.get("has_next"):
+            self._append_step("下一門")
 
     def show_completed(self, count: int) -> None:
         self.snapshot = None
         self.scan_button.setEnabled(True)
         self.start_button.setEnabled(False)
         self.clipboard_button.setEnabled(False)
-        self.continue_button.setEnabled(False)
         self.question_count.setText("全部測驗已處理")
+        self._append_step("全部測驗已處理")
         self.banner.show_state("success", f"最後一門已填入並送出 {count} 題，測驗佇列完成。")
 
     def show_error(self, message: str) -> None:
@@ -186,5 +192,10 @@ class QuizPage(QWidget):
             self.snapshot is None and bool(self.selected_candidates())
         )
         self.clipboard_button.setEnabled(self.snapshot is not None)
-        self.continue_button.setEnabled(self.snapshot is not None)
+        self._append_step(f"錯誤：{message}")
         self.banner.show_state("error", message)
+
+    def _append_step(self, text: str) -> None:
+        self.step_editor.appendPlainText(text)
+        scrollbar = self.step_editor.verticalScrollBar()
+        scrollbar.setValue(scrollbar.maximum())

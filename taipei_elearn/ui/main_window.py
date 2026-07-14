@@ -36,6 +36,7 @@ class BrowserWorker(QObject):
     quiz_filled = Signal(int)
     quiz_scan_completed = Signal(object)
     quiz_queue_opened = Signal(object)
+    quiz_submitted = Signal(object)
     quiz_queue_completed = Signal(int)
     enrollment_search_completed = Signal(object)
     pocket_add_completed = Signal(object)
@@ -140,11 +141,25 @@ class BrowserWorker(QObject):
 
     def _fill_quiz(self, answers) -> None:
         try:
-            count = self.manager.submit_quiz_answers(answers)
-            if self.manager.has_next_quiz():
+            raw_result = self.manager.submit_quiz_answers(answers)
+            result = (
+                dict(raw_result)
+                if isinstance(raw_result, dict)
+                else {"count": int(raw_result), "score": "平台未顯示"}
+            )
+            has_next = self.manager.has_next_quiz()
+            result["has_next"] = has_next
+            self.quiz_submitted.emit(result)
+            if has_next:
                 self.quiz_queue_opened.emit(self.manager.open_next_quiz())
             else:
-                self.quiz_queue_completed.emit(count)
+                self.quiz_queue_completed.emit(result["count"])
+                try:
+                    url = self.manager.open_learning_records()
+                except BrowserManagerError as exc:
+                    self.learning_records_open_failed.emit(str(exc))
+                else:
+                    self.learning_records_opened.emit(url)
         except BrowserManagerError as exc:
             self.quiz_failed.emit(str(exc))
 
@@ -333,6 +348,7 @@ class MainWindow(QMainWindow):
         self.worker.quiz_filled.connect(self._quiz_filled)
         self.worker.quiz_scan_completed.connect(self._quiz_scan_completed)
         self.worker.quiz_queue_opened.connect(self._quiz_queue_opened)
+        self.worker.quiz_submitted.connect(self._quiz_submitted)
         self.worker.quiz_queue_completed.connect(self._quiz_queue_completed)
         self.worker.enrollment_search_completed.connect(self._enrollment_search_completed)
         self.worker.pocket_add_completed.connect(self._pocket_add_completed)
@@ -438,6 +454,13 @@ class MainWindow(QMainWindow):
         self.quiz.show_completed(count)
         self.statusBar().showMessage("測驗佇列已完成")
         self._bring_to_front()
+
+    @Slot(object)
+    def _quiz_submitted(self, result) -> None:
+        self.quiz.show_submission(result)
+        self.statusBar().showMessage(
+            f"測驗已送出；分數：{result.get('score') or '平台未顯示'}"
+        )
 
     @Slot(object)
     def _quiz_queue_opened(self, result) -> None:

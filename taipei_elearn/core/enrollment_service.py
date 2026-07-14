@@ -8,6 +8,12 @@ class EnrollmentError(RuntimeError):
 
 
 @dataclass(frozen=True)
+class EnrollmentKeywordRequest:
+    keyword: str
+    course_limit: int = 5
+
+
+@dataclass(frozen=True)
 class EnrollmentCourse:
     course_id: str
     title: str
@@ -52,21 +58,21 @@ class EnrollmentService:
     COURSE_CENTER_URL = "https://elearning.taipei/mpage/view_type_list"
     POCKET_URL = "https://elearning.taipei/mpage/pocket/show"
     POCKET_ADD_URL = "https://elearning.taipei/mpage/pocket/add"
-    MAX_PER_KEYWORD = 5
-
     def search(
-        self, page, keywords: list[str],
+        self, page, keywords,
         progress: Callable[[str], None] | None = None,
     ) -> EnrollmentSearchResult:
-        cleaned = self._normalize_keywords(keywords)
-        if not cleaned:
+        requests = self._normalize_keyword_requests(keywords)
+        if not requests:
             raise EnrollmentError("常用關鍵字清單是空的。")
         courses: dict[str, EnrollmentCourse] = {}
         pages_scanned = 0
-        for keyword_index, keyword in enumerate(cleaned, 1):
+        for keyword_index, request in enumerate(requests, 1):
+            keyword = request.keyword
+            course_limit = request.course_limit
             keyword_course_count = 0
             if progress:
-                progress(f"搜尋 {keyword_index}/{len(cleaned)}：{keyword}")
+                progress(f"搜尋 {keyword_index}/{len(requests)}：{keyword}")
             page.goto(self.COURSE_CENTER_URL, wait_until="domcontentloaded", timeout=30_000)
             keyword_input = page.locator("#keyword")
             submit = page.get_by_role("button", name="送出查詢", exact=True)
@@ -90,19 +96,21 @@ class EnrollmentService:
                 pages_scanned += 1
                 keyword_course_count += self._merge_page_results(
                     courses, keyword, self._extract_page(page),
-                    self.MAX_PER_KEYWORD - keyword_course_count,
+                    course_limit - keyword_course_count,
                 )
                 if progress:
                     progress(
-                        f"搜尋 {keyword_index}/{len(cleaned)}：{keyword}｜"
+                        f"搜尋 {keyword_index}/{len(requests)}：{keyword}｜"
                         f"第 {page_number}/{total_pages} 頁｜"
-                        f"本關鍵字 {keyword_course_count}/{self.MAX_PER_KEYWORD} 門｜"
+                        f"本關鍵字 {keyword_course_count}/{course_limit} 門｜"
                         f"累計 {len(courses)} 門"
                     )
-                if keyword_course_count >= self.MAX_PER_KEYWORD:
+                if keyword_course_count >= course_limit:
                     break
         ordered = tuple(sorted(courses.values(), key=lambda item: item.course_id, reverse=True))
-        return EnrollmentSearchResult(ordered, tuple(cleaned), pages_scanned)
+        return EnrollmentSearchResult(
+            ordered, tuple(request.keyword for request in requests), pages_scanned
+        )
 
     def add_to_pocket(
         self, page, courses: list[EnrollmentCourse],
@@ -161,15 +169,32 @@ class EnrollmentService:
         return PocketEnrollResult(not failed, message)
 
     @staticmethod
-    def _normalize_keywords(keywords: list[str]) -> list[str]:
+    def _normalize_keyword_requests(keywords) -> list[EnrollmentKeywordRequest]:
         result = []
         seen = set()
         for raw in keywords:
-            keyword = str(raw).strip()
+            if isinstance(raw, EnrollmentKeywordRequest):
+                keyword = raw.keyword.strip()
+                course_limit = raw.course_limit
+            elif isinstance(raw, dict):
+                keyword = str(raw.get("keyword") or "").strip()
+                course_limit = raw.get("course_limit", 5)
+            elif hasattr(raw, "keyword"):
+                keyword = str(raw.keyword).strip()
+                course_limit = getattr(raw, "course_limit", 5)
+            else:
+                keyword = str(raw).strip()
+                course_limit = 5
             key = keyword.casefold()
             if keyword and key not in seen:
                 seen.add(key)
-                result.append(keyword)
+                try:
+                    course_limit = int(course_limit)
+                except (TypeError, ValueError):
+                    course_limit = 5
+                result.append(EnrollmentKeywordRequest(
+                    keyword, max(1, min(5, course_limit))
+                ))
         return result
 
     @staticmethod

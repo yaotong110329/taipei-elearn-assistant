@@ -19,13 +19,18 @@ class MaterialEntry:
 class CourseNavigator:
     SKIP_TITLES = ("正式測驗", "問卷", "滿意度", "客服中心")
     BLOCK_TITLES = ("退選", "推薦", "取消", "登出", "問卷", "調查", "測驗", "返回", "上一步", "論壇", "討論區")
+    SCORM_ENTER_SELECTORS = (
+        'button#n[name="mode"][value="normal"]',
+        'form[action*="/mod/scorm/player.php"] button[name="mode"][value="normal"]',
+        'form[action*="/mod/scorm/player.php"] input[type="submit"][name="mode"][value="normal"]',
+    )
     MATERIAL_SELECTORS = (
         'a[href*="/mod/scorm/view.php"]',
         'a[href*="/mod/scorm/player.php"]',
         'a[href*="/mod/resource/view.php"]',
         'a[href*="/mod/page/view.php"]',
         "a[onclick*='launchActivity']",
-    )
+    ) + SCORM_ENTER_SELECTORS
 
     def __init__(self) -> None:
         self.media_started = False
@@ -57,7 +62,7 @@ class CourseNavigator:
             if item["title"] and not any(word in item["title"] for word in ("環境檢測", "新手上路", "前言"))
         ]
 
-    def enter_material(self, page, entry: MaterialEntry) -> None:
+    def enter_material(self, page, entry: MaterialEntry):
         if entry.strategy == "scorm":
             # 平台有些課程以新分頁開 player；等待原頁 navigation 會永久卡住。
             # 掃描得到的 SCORM URL 已含唯一活動 ID，直接導向最穩定。
@@ -73,11 +78,15 @@ class CourseNavigator:
                 if retry_link.count() == 1:
                     # 部分課程首次只初始化 SCORM 並返回課程頁；同入口再進一次才有 player。
                     page.goto(entry.url, wait_until="domcontentloaded", timeout=30_000)
-            if "/mod/scorm/player.php" not in page.url:
-                raise CourseNavigationError(f"SCORM 未進入 player：{page.url}")
-            page.wait_for_timeout(1000)
-            self.media_started = self.ensure_media_started(page)
-            return
+            player_page = self.find_player_page(page)
+            if player_page is not None:
+                player_page.wait_for_timeout(1000)
+                self.media_started = self.ensure_media_started(player_page)
+                return player_page
+
+            # 部分 SCORM view 頁仍有一層明確的「進入」表單。
+            # 交由 penetrate_to_player 持續穿透，不能在此過早判定失敗。
+            return page
         match = re.search(r"launchActivity\(this,\s*(['\"])(.*?)\1,\s*(['\"])(.*?)\3\)", entry.url)
         if not match:
             raise CourseNavigationError("無法解析 launchActivity 教材入口。")
@@ -87,24 +96,34 @@ class CourseNavigator:
             raise CourseNavigationError(f"教材入口不唯一：{title}")
         locator.click()
         self._wait_for_terminal_or_next_layer(page)
+        return page
 
-    def penetrate_to_player(self, page, max_steps: int = 12) -> str:
+    def penetrate_to_player(self, page, max_steps: int = 12):
         """沿平台明確教材入口前進；每個元素只點一次，抵達 player 即停止。"""
         clicked: set[str] = set()
         for _ in range(max_steps):
-            if self.is_player(page):
-                return page.url
-            candidates = page.locator(", ".join(self.MATERIAL_SELECTORS)).evaluate_all(
+            player_page = self.find_player_page(page)
+            if player_page is not None:
+                return player_page
+            candidate_locator = page.locator(", ".join(self.MATERIAL_SELECTORS))
+            candidates = candidate_locator.evaluate_all(
                 """els => els.map((el, index) => ({
                     index,
                     text:(el.textContent||'').replace(/\\s+/g,' ').trim(),
                     href:el.href||'',
-                    onclick:el.getAttribute('onclick')||''
+                    onclick:el.getAttribute('onclick')||'',
+                    tag:(el.tagName||'').toLowerCase(),
+                    id:el.id||'',
+                    name:el.getAttribute('name')||'',
+                    value:el.getAttribute('value')||''
                 }))"""
             )
             chosen = None
             for item in candidates:
-                signature = f"{item['href']}|{item['onclick']}|{item['text']}"
+                signature = (
+                    f"{page.url}|{item['href']}|{item['onclick']}|{item['tag']}|"
+                    f"{item['id']}|{item['name']}|{item['value']}|{item['text']}"
+                )
                 if signature in clicked or any(word in item["text"] for word in self.BLOCK_TITLES):
                     continue
                 chosen = (item, signature)
@@ -115,13 +134,48 @@ class CourseNavigator:
             clicked.add(signature)
             if item["href"] and "/mod/" in item["href"]:
                 page.goto(item["href"], wait_until="domcontentloaded", timeout=30_000)
-            else:
+            elif item["onclick"]:
                 locator = page.locator("a[onclick*='launchActivity']", has_text=item["text"])
                 if locator.count() != 1:
                     raise CourseNavigationError(f"教材入口不唯一：{item['text']}")
                 locator.click()
                 self._wait_for_terminal_or_next_layer(page)
+            elif (
+                item["tag"] in {"button", "input"}
+                and item["name"] == "mode"
+                and item["value"] == "normal"
+            ):
+                candidate_locator.nth(item["index"]).click()
+                player_page = self._wait_for_player(page)
+                if player_page is not None:
+                    return player_page
+            else:
+                raise CourseNavigationError("教材入口類型不受支援；停止穿透。")
         raise CourseNavigationError(f"教材穿透超過 {max_steps} 層；停止避免無限點擊。")
+
+    @classmethod
+    def find_player_page(cls, page):
+        candidates = [page]
+        context = getattr(page, "context", None)
+        for candidate in getattr(context, "pages", ()):
+            if candidate not in candidates:
+                candidates.append(candidate)
+        for candidate in reversed(candidates):
+            try:
+                is_closed = getattr(candidate, "is_closed", lambda: False)
+                if not is_closed() and cls.is_player(candidate):
+                    return candidate
+            except Exception:
+                continue
+        return None
+
+    def _wait_for_player(self, page, attempts: int = 20):
+        for _ in range(attempts):
+            player_page = self.find_player_page(page)
+            if player_page is not None:
+                return player_page
+            page.wait_for_timeout(250)
+        return None
 
     @staticmethod
     def is_player(page) -> bool:

@@ -194,3 +194,57 @@ def test_scorm_entry_retries_once_when_platform_returns_to_course_page():
     navigator.enter_material(page, entry)
     assert page.goto_calls == [entry.url, entry.url]
     assert "/mod/scorm/player.php" in page.url
+
+
+class LayeredScormLocator(FakeLocator):
+    def evaluate_all(self, _script):
+        return [{
+            "index": 0,
+            "text": "進入",
+            "href": "",
+            "onclick": "",
+            "tag": "button",
+            "id": "n",
+            "name": "mode",
+            "value": "normal",
+        }]
+
+    def nth(self, index):
+        assert index == 0
+        return self
+
+    def click(self):
+        self.page.enter_clicks += 1
+        self.page.url = "https://example.test/mod/scorm/player.php?id=4072"
+        self.page.player = True
+
+
+class LayeredScormPage(DirectScormPage):
+    def __init__(self):
+        super().__init__()
+        self.url = "https://example.test/mod/scorm/view.php?id=4072"
+        self.player = False
+        self.enter_clicks = 0
+        self.closed = False
+        self.context = FakeContext([self])
+
+    def is_closed(self):
+        return self.closed
+
+    def locator(self, selector, **_kwargs):
+        if "button#n" in selector:
+            return LayeredScormLocator(self, selector, 1)
+        if selector.startswith("#scorm_object"):
+            return FakeLocator(self, selector, int(self.player))
+        return FakeLocator(self, selector, 0)
+
+
+def test_penetrates_scorm_view_enter_button_before_player():
+    page = LayeredScormPage()
+    navigator = CourseNavigator()
+
+    player_page = navigator.penetrate_to_player(page)
+
+    assert player_page is page
+    assert page.enter_clicks == 1
+    assert "/mod/scorm/player.php" in page.url
