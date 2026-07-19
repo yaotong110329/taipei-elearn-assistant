@@ -139,6 +139,7 @@ class FakeSimpleLocator:
         self._count = count
         self.attribute = attribute
         self.clicked = False
+        self.filled_value = None
 
     def count(self):
         return self._count
@@ -148,6 +149,9 @@ class FakeSimpleLocator:
 
     def click(self):
         self.clicked = True
+
+    def fill(self, value):
+        self.filled_value = value
 
 
 class FakeDialog:
@@ -177,19 +181,30 @@ class FakeActionPage:
         self.goto_urls = []
         self.dialog = FakeDialog()
         self.enroll_button = FakeSimpleLocator()
+        self.keyword = FakeSimpleLocator()
+        self.submit = FakeSimpleLocator()
+        self.pocket_button = FakeSimpleLocator()
 
     def goto(self, url, **_kwargs):
         self.goto_urls.append(url)
 
     def locator(self, selector):
-        if selector == 'meta[name="csrf-token"]':
-            return FakeSimpleLocator(attribute="token")
+        if selector == "#keyword":
+            return self.keyword
+        if selector == 'button[data-course-id="10"]':
+            return self.pocket_button
         if selector == "#enroll-all":
             return self.enroll_button
         raise AssertionError(selector)
 
     def get_by_text(self, *_args, **_kwargs):
         return FakeSimpleLocator(count=0)
+
+    def get_by_role(self, *_args, **_kwargs):
+        return self.submit
+
+    def expect_navigation(self, **_kwargs):
+        return nullcontext()
 
     def expect_event(self, *_args, **_kwargs):
         return FakeEventInfo(self.dialog)
@@ -201,11 +216,13 @@ def course():
     )
 
 
-def test_add_to_pocket_posts_course_id_and_opens_pocket():
+def test_add_to_pocket_uses_site_button_and_opens_pocket():
     page = FakeActionPage()
     result = EnrollmentService().add_to_pocket(page, [course()])
     assert result.success_count == 1
-    assert page.request.posts[0][1]["data"] == {"course_id": "10"}
+    assert page.keyword.filled_value == "環境課"
+    assert page.pocket_button.clicked
+    assert page.dialog.accepted
     assert page.goto_urls[-1] == EnrollmentService.POCKET_URL
 
 
