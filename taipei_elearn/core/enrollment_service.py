@@ -119,28 +119,17 @@ class EnrollmentService:
         selected = [course for course in courses if course.can_add]
         if not selected:
             raise EnrollmentError("沒有已勾選且可加入選課口袋的課程。")
-        page.goto(self.COURSE_CENTER_URL, wait_until="domcontentloaded", timeout=30_000)
-        token = page.locator('meta[name="csrf-token"]').get_attribute("content")
-        if not token:
-            raise EnrollmentError("選課中心缺少 CSRF token，停止加入選課口袋。")
         results = []
         for index, course in enumerate(selected, 1):
             if progress:
                 progress(f"加入選課口袋 {index}/{len(selected)}：{course.title}")
             try:
-                response = page.request.post(
-                    self.POCKET_ADD_URL,
-                    headers={"X-CSRF-TOKEN": token, "Accept": "application/json"},
-                    data={"course_id": course.course_id},
-                    timeout=30_000,
+                message = self._add_one_via_page(page, course)
+                success = not any(
+                    word in message for word in ("失敗", "錯誤", "無法", "不可", "停止")
                 )
-                payload = response.json()
-                message = str(payload.get("message") or "")
-                success = bool(response.ok and payload.get("success"))
-                if not success and any(word in message for word in ("已在選課口袋", "已加入")):
+                if any(word in message for word in ("已加入", "已在選課口袋")):
                     success = True
-                if not message:
-                    message = "已加入選課口袋" if success else "加入失敗"
             except Exception as exc:
                 success = False
                 message = str(exc).splitlines()[0]
@@ -148,7 +137,61 @@ class EnrollmentService:
                 course.course_id, course.title, success, message,
             ))
         page.goto(self.POCKET_URL, wait_until="domcontentloaded", timeout=30_000)
-        return PocketAddResult(tuple(results))
+        verified = []
+        for item in results:
+            if item.success:
+                verified.append(item)
+                continue
+            in_pocket = page.get_by_text(item.title, exact=True).count() > 0
+            verified.append(replace(
+                item,
+                success=in_pocket,
+                message="已在選課口袋" if in_pocket else item.message,
+            ))
+        return PocketAddResult(tuple(verified))
+
+    def _add_one_via_page(self, page, course: EnrollmentCourse) -> str:
+        """Use the site's public UI so frontend route/payload changes stay compatible."""
+        page.goto(self.COURSE_CENTER_URL, wait_until="domcontentloaded", timeout=30_000)
+        keyword_input = page.locator("#keyword")
+        submit = page.get_by_role("button", name="送出查詢", exact=True)
+        if keyword_input.count() != 1 or submit.count() != 1:
+            raise EnrollmentError("選課中心缺少唯一的課程名稱欄或送出查詢按鈕。")
+        keyword_input.fill(course.title)
+        with page.expect_navigation(wait_until="domcontentloaded", timeout=30_000):
+            submit.click()
+
+        escaped_id = course.course_id.replace("\\", "\\\\").replace('"', '\\"')
+        button = page.locator(f'button[data-course-id="{escaped_id}"]')
+        if button.count() != 1:
+            already_added = page.get_by_text("已加入選課口袋", exact=False)
+            if already_added.count() > 0:
+                return "已在選課口袋"
+            raise EnrollmentError(f"搜尋結果找不到「{course.title}」的放入選課口袋按鈕。")
+
+        try:
+            with page.expect_event("dialog", timeout=15_000) as dialog_info:
+                button.click()
+            dialog = dialog_info.value
+            message = (dialog.message or "").strip()
+            dialog.accept()
+            return message or "已加入選課口袋"
+        except Exception as dialog_error:
+            modal = page.locator(
+                '[role="dialog"]:visible, .modal.show:visible, .swal2-popup:visible'
+            )
+            if modal.count() < 1:
+                raise EnrollmentError(
+                    f"放入選課口袋後未取得平台結果：{str(dialog_error).splitlines()[0]}"
+                ) from dialog_error
+            current = modal.last
+            message = re.sub(r"\s+", " ", current.inner_text()).strip()
+            confirm = current.locator("button:visible").filter(
+                has_text=re.compile(r"確定|OK|關閉", re.I)
+            )
+            if confirm.count() == 1:
+                confirm.click()
+            return message or "已加入選課口袋"
 
     def enroll_all(self, page) -> PocketEnrollResult:
         page.goto(self.POCKET_URL, wait_until="domcontentloaded", timeout=30_000)
