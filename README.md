@@ -1,4 +1,4 @@
-# 臺北 e 大學習輔助程式 v1.1.0
+# 臺北 e 大學習輔助程式 v1.1.1
 
 Windows 桌面工具，用來減少臺北 e 大登入、掃描、上課、答題與選課流程中的重複操作。程式操作正式 Google Chrome，不保存帳號密碼，也不偽造平台資料。
 
@@ -15,7 +15,7 @@ Windows 桌面工具，用來減少臺北 e 大登入、掃描、上課、答題
 
 ## 離線版安裝
 
-1. 從 [GitHub Releases](https://github.com/yaotong110329/taipei-elearn-assistant/releases) 下載 `TaipeiELearnAssistant-v1.1.0-win64.zip`。
+1. 從 [GitHub Releases](https://github.com/yaotong110329/taipei-elearn-assistant/releases) 下載 `TaipeiELearnAssistant-v1.1.1-win64.zip`。
 2. 完整解壓縮 ZIP；不能只取出 EXE。
 3. 確認 Windows 10/11 64-bit 已安裝正式版 Google Chrome。
 4. 執行 `TaipeiELearnAssistant\TaipeiELearnAssistant.exe`。
